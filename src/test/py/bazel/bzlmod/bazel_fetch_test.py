@@ -48,9 +48,9 @@ class BazelFetchTest(test_base.TestBase):
     # The existence of WORKSPACE.bzlmod prevents WORKSPACE prefixes or suffixes
     # from being used; this allows us to test built-in modules actually work
     self.ScratchFile('WORKSPACE.bzlmod')
-    self.generatBuiltinModules()
+    self.generateBuiltinModules()
 
-  def generatBuiltinModules(self):
+  def generateBuiltinModules(self):
     self.ScratchFile('platforms_mock/BUILD')
     self.ScratchFile('platforms_mock/WORKSPACE')
     self.ScratchFile(
@@ -268,6 +268,103 @@ class BazelFetchTest(test_base.TestBase):
     # One more time to validate force is invoked and not cached by skyframe
     _, _, stderr = self.RunBazel(['fetch', '--repo=@hello', '--force'])
     self.assertIn('No more Orange Juice!', ''.join(stderr))
+
+  def testVendor(self):
+    self.main_registry.createCcModule('aaa', '1.0').createCcModule(
+      'bbb', '1.0', {'aaa': '1.0'}
+    )
+    self.ScratchFile(
+      'MODULE.bazel',
+      [
+        'bazel_dep(name = "bbb", version = "1.0")',
+        'ext = use_extension("extension.bzl", "ext")',
+        'use_repo(ext, "regularRepo")',
+        'use_repo(ext, "localRepo")',
+        'use_repo(ext, "configRepo")',
+        'local_path_override(module_name="bazel_tools", path="tools_mock")',
+        'local_path_override(module_name="local_config_platform", ',
+        'path="platforms_mock")',
+      ],
+    )
+    self.ScratchFile('BUILD')
+    self.ScratchFile(
+      'extension.bzl',
+      [
+        'def _repo_rule_impl(ctx):',
+        '    ctx.file("WORKSPACE")',
+        '    ctx.file("BUILD")',
+        '',
+        'repo_rule1 = repository_rule(implementation=_repo_rule_impl)',
+        'repo_rule2 = repository_rule(implementation=_repo_rule_impl, ',
+        'local=True)',
+        'repo_rule3 = repository_rule(implementation=_repo_rule_impl, ',
+        'configure=True)',
+        '',
+        'def _ext_impl(ctx):',
+        '    repo_rule1(name="regularRepo")',
+        '    repo_rule2(name="localRepo")',
+        '    repo_rule3(name="configRepo")',
+        'ext = module_extension(implementation=_ext_impl)',
+      ],
+    )
+
+    self.RunBazel(['vendor', '--vendor_dir=vendor'])
+    repos_vendored = os.listdir(self._test_cwd + '/vendor')
+
+    # Assert repos are vendored with marker files and .vendorignore is created
+    self.assertIn('aaa~1.0', repos_vendored)
+    self.assertIn('bbb~1.0', repos_vendored)
+    self.assertIn('@aaa~1.0.marker', repos_vendored)
+    self.assertIn('@bbb~1.0.marker', repos_vendored)
+    self.assertIn('_main~ext~regularRepo', repos_vendored)
+    self.assertIn('@_main~ext~regularRepo.marker', repos_vendored)
+    self.assertIn('.vendorignore', repos_vendored)
+
+    # Assert local and config are not vendored
+    self.assertNotIn('_main~ext~localRepo', repos_vendored)
+    self.assertNotIn('_main~ext~configRepo', repos_vendored)
+
+    # build with vendored repos
+    self.RunBazel(['build', '@regularRepo//:all', "--vendor_dir=vendor"])
+
+    # Make updates
+    self.main_registry.createCcModule('ccc', '1.1') \
+      .createCcModule('ddd', '1.1') \
+      .createCcModule('bbb', '1.0', {'aaa': '1.0', 'ccc': '1.1', 'ddd': '1.1'})
+    self.ScratchFile(
+      'MODULE.bazel',
+      [
+        'bazel_dep(name = "bbb", version = "1.0")',
+        'local_path_override(module_name="bazel_tools", path="tools_mock")',
+        'local_path_override(module_name="local_config_platform", ',
+        'path="platforms_mock")',
+      ],
+    )
+    with open(self._test_cwd + '/vendor/.vendorignore', 'w') as f:
+      f.write("ddd~1.1\n")
+
+    # Keep marker to check it was updated later
+    with open(self._test_cwd + '/vendor/@bbb~1.0.marker', 'r') as f:
+      bbbMarker = f.read()
+
+    # Re-vendor everything
+    self.RunBazel(['vendor', '--vendor_dir=vendor'])
+    repos_vendored = os.listdir(self._test_cwd + '/vendor')
+    self.assertIn('aaa~1.0', repos_vendored)
+    self.assertIn('bbb~1.0', repos_vendored)
+    self.assertIn('ccc~1.1', repos_vendored)
+    self.assertIn('@aaa~1.0.marker', repos_vendored)
+    self.assertIn('@bbb~1.0.marker', repos_vendored)
+    self.assertIn('@ccc~1.1.marker', repos_vendored)
+
+    # Assert ddd was ignored
+    self.assertNotIn('ddd~1.1', repos_vendored)
+    self.assertNotIn('@ddd~1.0.marker', repos_vendored)
+
+    # Assert bbb marker is updated
+    with open(self._test_cwd + '/vendor/@bbb~1.0.marker', 'r') as f:
+      bbbMarker_updated = f.read()
+    self.assertNotEqual(bbbMarker, bbbMarker_updated)
 
 
 if __name__ == '__main__':

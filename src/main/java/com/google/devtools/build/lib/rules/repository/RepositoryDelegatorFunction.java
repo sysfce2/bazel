@@ -70,6 +70,8 @@ public final class RepositoryDelegatorFunction implements SkyFunction {
   public static final Precomputed<Map<RepositoryName, PathFragment>> REPOSITORY_OVERRIDES =
       new Precomputed<>("repository_overrides");
 
+  public static final String FORCE_FETCH_DISABLED = "";
+
   public static final Precomputed<String> FORCE_FETCH =
       new Precomputed<>("dependency_for_force_fetching_repository");
 
@@ -79,7 +81,11 @@ public final class RepositoryDelegatorFunction implements SkyFunction {
   public static final Precomputed<Optional<RootedPath>> RESOLVED_FILE_INSTEAD_OF_WORKSPACE =
       new Precomputed<>("resolved_file_instead_of_workspace");
 
-  public static final String FORCE_FETCH_DISABLED = "";
+  public static final Precomputed<Boolean> VENDOR_COMMAND =
+      new Precomputed<>("call_from_vendor_command");
+
+  public static final Precomputed<Optional<Path>> VENDOR_DIRECTORY =
+      new Precomputed<>("vendor_directory");
 
   // The marker file version is inject in the rule key digest so the rule key is always different
   // when we decide to update the format.
@@ -170,6 +176,27 @@ public final class RepositoryDelegatorFunction implements SkyFunction {
     }
 
     DigestWriter digestWriter = new DigestWriter(directories, repositoryName, rule);
+    if(shouldUseVendorRepos(env, handler, rule)) {
+      Path vendorPath = VENDOR_DIRECTORY.get(env).get();
+      Path vendorMarker = vendorPath.getChild("@" + repositoryName.getName() + ".marker");
+      boolean isVendorRepoUpdated =
+          digestWriter.areRepositoryAndMarkerFileConsistent(handler, env, vendorMarker) != null;
+      if (env.valuesMissing()) {
+        return null;
+      }
+      if (isVendorRepoUpdated) {
+        PathFragment vendorRepoPath = vendorPath.getRelative(repositoryName.getName()).asFragment();
+        return setupOverride(vendorRepoPath, env, repoRoot, repositoryName.getName());
+      } else { //TODO(salmasamy) do we really want to fail here?
+        throw new RepositoryFunctionException(
+            new IOException(
+                "External repository " + repositoryName.getName()
+                    + " not found or not up-to-date and vendor mode is on. "
+                    + "To fix run 'bazel vendor --vendor_dir={vendor_path}'"),
+            Transience.TRANSIENT);
+      }
+    }
+
     if (shouldUseCachedRepos(env, handler, repoRoot, rule)) {
       // Make sure marker file is up-to-date; correctly describes the current repository state
       byte[] markerHash = digestWriter.areRepositoryAndMarkerFileConsistent(handler, env);
@@ -178,6 +205,9 @@ public final class RepositoryDelegatorFunction implements SkyFunction {
       }
       if (markerHash != null) {
         return RepositoryDirectoryValue.builder().setPath(repoRoot).setDigest(markerHash).build();
+      } else {
+        //So that we are in a consistent state if something happens while fetching the repository
+        DigestWriter.clearMarkerFile(directories, repositoryName);
       }
     }
 
@@ -268,6 +298,22 @@ public final class RepositoryDelegatorFunction implements SkyFunction {
      * 2) Force fetch configure is enabled (bazel sync --configure), OR
      * 3) Repository directory does not exist */
     if (forceFetchEnabled || forceFetchConfigureEnabled || !repoRoot.exists()) {
+      return false;
+    }
+
+    return true;
+  }
+
+  /* Determines whether we should use the vendored repositories */
+  private boolean shouldUseVendorRepos(Environment env, RepositoryFunction handler, Rule rule)
+      throws InterruptedException {
+    if (handler.isLocal(rule) || handler.isConfigure(rule)) {
+      return false;
+    }
+
+    //If this is vendor command, we want to fetch normally and then vendoring will be handled
+    //by VendorModule.
+    if (VENDOR_COMMAND.get(env) != null || VENDOR_DIRECTORY.get(env).isEmpty()) {
       return false;
     }
 
@@ -520,12 +566,15 @@ public final class RepositoryDelegatorFunction implements SkyFunction {
       return new Fingerprint().addString(content).digestAndReset();
     }
 
+    @Nullable
+    byte[] areRepositoryAndMarkerFileConsistent(RepositoryFunction handler, Environment env)
+        throws InterruptedException, RepositoryFunctionException {
+      return areRepositoryAndMarkerFileConsistent(handler, env, markerPath);
+    }
+
     /**
      * Checks if the state of the repository in the file system is consistent with the rule in the
      * WORKSPACE file.
-     *
-     * <p>Deletes the marker file if not so that no matter what happens after, the state of the file
-     * system stays consistent.
      *
      * <p>Returns null if the file system is not up to date and a hash of the marker file if the
      * file system is up to date.
@@ -535,8 +584,8 @@ public final class RepositoryDelegatorFunction implements SkyFunction {
      * and the state of the file system would be inconsistent.
      */
     @Nullable
-    byte[] areRepositoryAndMarkerFileConsistent(RepositoryFunction handler, Environment env)
-        throws RepositoryFunctionException, InterruptedException {
+    byte[] areRepositoryAndMarkerFileConsistent(RepositoryFunction handler, Environment env,
+        Path markerPath) throws RepositoryFunctionException, InterruptedException {
       if (!markerPath.exists()) {
         return null;
       }
@@ -557,8 +606,6 @@ public final class RepositoryDelegatorFunction implements SkyFunction {
         if (verified) {
           return new Fingerprint().addString(content).digestAndReset();
         } else {
-          // So that we are in a consistent state if something happens while fetching the repository
-          markerPath.delete();
           return null;
         }
       } catch (IOException e) {
