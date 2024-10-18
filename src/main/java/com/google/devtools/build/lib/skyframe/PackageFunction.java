@@ -19,12 +19,12 @@ import static com.google.common.base.Preconditions.checkState;
 import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.devtools.build.lib.actions.FileValue;
 import com.google.devtools.build.lib.actions.ThreadStateReceiver;
 import com.google.devtools.build.lib.clock.BlazeClock;
+import com.google.devtools.build.lib.cmdline.IgnoredSubdirectories;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.cmdline.LabelConstants;
 import com.google.devtools.build.lib.cmdline.LabelSyntaxException;
@@ -61,6 +61,7 @@ import com.google.devtools.build.lib.skyframe.RepoFileFunction.BadRepoFileExcept
 import com.google.devtools.build.lib.skyframe.StarlarkBuiltinsFunction.BuiltinsFailedException;
 import com.google.devtools.build.lib.util.DetailedExitCode;
 import com.google.devtools.build.lib.util.Pair;
+import com.google.devtools.build.lib.vfs.DetailedIOException;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
@@ -534,12 +535,13 @@ public abstract class PackageFunction implements SkyFunction {
       // NoSuchPackageException. If that happens, we prefer throwing an exception derived from
       // Skyframe globbing. See the comments in #handleGlobDepsAndPropagateFilesystemExceptions.
       // Therefore we store the exception encountered here and maybe use it later.
-      pfeFromNonSkyframeGlobbing =
-          new PackageFunctionException(
-              e,
-              e.getCause() instanceof SkyframeGlobbingIOException
-                  ? Transience.PERSISTENT
-                  : Transience.TRANSIENT);
+      Transience transience =
+          switch (e.getCause()) {
+            case DetailedIOException detailed -> detailed.getTransience();
+            case SkyframeGlobbingIOException skyframeGlobbing -> Transience.PERSISTENT;
+            case null, default -> Transience.TRANSIENT;
+          };
+      pfeFromNonSkyframeGlobbing = new PackageFunctionException(e, transience);
     } catch (InternalInconsistentFilesystemException e) {
       throw e.throwPackageFunctionException();
     }
@@ -975,8 +977,8 @@ public abstract class PackageFunction implements SkyFunction {
     String workspaceName = workspaceNameValue.getName();
     RepositoryMapping repositoryMapping = repositoryMappingValue.getRepositoryMapping();
     RepositoryMapping mainRepositoryMapping = mainRepositoryMappingValue.getRepositoryMapping();
-    ImmutableSet<PathFragment> repositoryIgnoredPatterns =
-        repositoryIgnoredPackagePrefixes.getPatterns();
+    IgnoredSubdirectories repositoryIgnoredSubdirectories =
+        repositoryIgnoredPackagePrefixes.asIgnoredSubdirectories();
     Label preludeLabel = null;
 
     // Load (optional) prelude, which determines environment.
@@ -1104,7 +1106,7 @@ public abstract class PackageFunction implements SkyFunction {
               packageFactory.createNonSkyframeGlobber(
                   buildFileRootedPath.asPath().getParentDirectory(),
                   packageId,
-                  repositoryIgnoredPatterns,
+                  repositoryIgnoredSubdirectories,
                   packageLocator,
                   threadStateReceiverFactoryForMetrics.apply(keyForMetrics)),
               packageId,

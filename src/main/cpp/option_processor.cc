@@ -514,6 +514,13 @@ blaze_exit_code::ExitCode OptionProcessor::ParseOptions(
 
   blazerc_and_env_command_args_ =
       GetBlazercAndEnvCommandArgs(cwd, rc_file_ptrs, GetProcessedEnv());
+  // This is necessary because some code at Google both links in this code and
+  // needs to be ready for old versions of Bazel that don't support this
+  // argument yet.
+  if (startup_options_->quiet) {
+    blazerc_and_env_command_args_.push_back(
+        "--default_override=0:common=--quiet");
+  }
   return blaze_exit_code::SUCCESS;
 }
 
@@ -657,7 +664,9 @@ std::vector<std::string> OptionProcessor::GetBlazercAndEnvCommandArgs(
     const std::vector<std::string>& env) {
   // Provide terminal options as coming from the least important rc file.
   std::vector<std::string> result = {
+      // LINT.IfChange
       "--rc_source=client",
+      // LINT.ThenChange(src/main/java/com/google/devtools/common/options/GlobalRcUtils.java)
       "--default_override=0:common=--isatty=" +
           blaze_util::ToString(IsStandardTerminal()),
       "--default_override=0:common=--terminal_columns=" +

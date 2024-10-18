@@ -20,7 +20,6 @@ import static com.google.common.base.Throwables.throwIfInstanceOf;
 import static com.google.common.base.Throwables.throwIfUnchecked;
 import static com.google.common.collect.ImmutableList.toImmutableList;
 import static com.google.common.collect.ImmutableMap.toImmutableMap;
-import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static com.google.devtools.build.lib.analysis.config.CommonOptions.EMPTY_OPTIONS;
 import static com.google.devtools.build.lib.concurrent.Uninterruptibles.callUninterruptibly;
 import static com.google.devtools.build.lib.skyframe.ArtifactConflictFinder.ACTION_CONFLICTS;
@@ -121,6 +120,7 @@ import com.google.devtools.build.lib.bazel.bzlmod.BzlmodRepoRuleValue;
 import com.google.devtools.build.lib.bazel.repository.RepositoryOptions;
 import com.google.devtools.build.lib.bugreport.BugReporter;
 import com.google.devtools.build.lib.buildtool.BuildRequestOptions;
+import com.google.devtools.build.lib.cmdline.IgnoredSubdirectories;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.cmdline.Label.LabelInterner;
 import com.google.devtools.build.lib.cmdline.Label.PackageContext;
@@ -494,7 +494,7 @@ public abstract class SkyframeExecutor implements WalkableGraphFactory {
   private Set<String> previousClientEnvironment = ImmutableSet.of();
 
   // Contain the paths in the .bazelignore file.
-  private ImmutableSet<Path> ignoredPaths = ImmutableSet.of();
+  private IgnoredSubdirectories ignoredPaths = IgnoredSubdirectories.EMPTY;
 
   Duration sourceDiffCheckingDuration = Duration.ofSeconds(-1L);
 
@@ -1402,7 +1402,7 @@ public abstract class SkyframeExecutor implements WalkableGraphFactory {
     return pkgLocator;
   }
 
-  public ImmutableSet<Path> getIgnoredPaths() {
+  public IgnoredSubdirectories getIgnoredPaths() {
     return ignoredPaths;
   }
 
@@ -2272,8 +2272,14 @@ public abstract class SkyframeExecutor implements WalkableGraphFactory {
    * done.
    */
   public void clearExecutionStatesSkymeld(ExtendedEventHandler eventHandler) {
-    watchdog.stop();
-    watchdog = null;
+    // In case of a very early error in the analysis/execution phase, there could be a race between
+    // the watchdog being set and this cleanup code.
+    // No risk of NPE due to check-then-act: if the watchdog is non-null, it'll only be set to null
+    // here.
+    if (watchdog != null) {
+      watchdog.stop();
+      watchdog = null;
+    }
     cleanUpAfterSingleEvaluationWithActionExecution(eventHandler);
     statusReporterRef.get().unregisterFromEventBus();
     setActionExecutionProgressReportingObjects(null, null, null);
@@ -3085,7 +3091,7 @@ public abstract class SkyframeExecutor implements WalkableGraphFactory {
         }
       }
 
-      if (state.changed()) {
+      if (state.versionChanged()) {
         skyKeyStateReceiver.evaluated(skyKey);
       }
       if (ignoreInvalidations) {
@@ -3254,6 +3260,11 @@ public abstract class SkyframeExecutor implements WalkableGraphFactory {
               java.util.function.Predicate<? super ParsedOptionDescription> filter) {
             return ImmutableMap.of();
           }
+
+          @Override
+          public ImmutableSet<String> getUserOptions() {
+            return ImmutableSet.of();
+          }
         });
   }
 
@@ -3288,9 +3299,9 @@ public abstract class SkyframeExecutor implements WalkableGraphFactory {
             && workspacePath.equals(pathEntry.asPath())
             && ignoredPackagePrefixesValue != null) {
           ignoredPaths =
-              ignoredPackagePrefixesValue.getPatterns().stream()
-                  .map(pathEntry::getRelative)
-                  .collect(toImmutableSet());
+              ignoredPackagePrefixesValue
+                  .asIgnoredSubdirectories()
+                  .withPrefix(pathEntry.asPath().asFragment().toRelative());
         }
 
         DiffAwarenessManager.ProcessableModifiedFileSet modifiedFileSet =

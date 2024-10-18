@@ -300,6 +300,7 @@ public class SkyQueryEnvironment extends AbstractBlazeQueryEnvironment<Target>
         eventHandler,
         FilteringPolicies.NO_FILTER,
         packageSemaphore,
+        /* maxConcurrentGetTargetsTasks= */ Optional.empty(),
         SimplePackageIdentifierBatchingCallback::new);
   }
 
@@ -896,7 +897,7 @@ public class SkyQueryEnvironment extends AbstractBlazeQueryEnvironment<Target>
                 ((IgnoredPackagePrefixesValue)
                         graph.getValue(
                             IgnoredPackagePrefixesValue.key(patternToEval.getRepository())))
-                    .getPatterns(),
+                    .asIgnoredSubdirectories(),
             targetPatternKey.getExcludedSubdirectories(),
             filteredCallback,
             QueryException.class,
